@@ -34,3 +34,4 @@ logs/
 .coverage
 htmlcov/
 /utilits/
+chat_tester_enhanced.html

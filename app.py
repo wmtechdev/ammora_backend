@@ -33,6 +33,70 @@ def health_check():
         'version': '1.0.0'
     }), 200
 
+@app.route('/api/user/<user_id>', methods=['GET'])
+def get_user(user_id):
+    """Get user data"""
+    try:
+        user_data = firebase_service.get_user(user_id)
+        if not user_data:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'name': user_data.get('name'),
+                'age': user_data.get('age'),
+                'email': user_data.get('email'),
+                'created_at': str(user_data.get('created_at', ''))
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/preferences/<user_id>', methods=['GET'])
+def get_preferences(user_id):
+    """Get user preferences"""
+    try:
+        preferences = firebase_service.get_user_preferences(user_id)
+        if not preferences:
+            return jsonify({'success': False, 'error': 'Preferences not found'}), 404
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'support_type': preferences.get('support_type'),
+                'conversation_tone': preferences.get('conversation_tone'),
+                'relationship_status': preferences.get('relationship_status'),
+                'topics_to_avoid': preferences.get('topics_to_avoid', '')
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/messages/<session_id>', methods=['GET'])
+def get_messages(session_id):
+    """Get message history for a session"""
+    try:
+        messages = firebase_service.get_session_messages(session_id, limit=50)
+        
+        formatted_messages = []
+        for msg in messages:
+            formatted_messages.append({
+                'message': msg.get('message'),
+                'type': msg.get('type'),
+                'timestamp': str(msg.get('timestamp', ''))
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'messages': formatted_messages,
+                'count': len(formatted_messages)
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
     """
