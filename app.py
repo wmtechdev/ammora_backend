@@ -157,7 +157,7 @@ def chat():
                 'error': 'user_id and message are required'
             }), 400
         
-        # Step 1: Get user data
+        # Get user data
         print(" Fetching user data from Firebase...")
         user_data = firebase_service.get_user(user_id)
         
@@ -168,9 +168,9 @@ def chat():
                 'error': 'User not found'
             }), 404
         
-        print(f"✅ User data retrieved: {user_data.get('name')}")
+        print(f" User data retrieved: {user_data.get('name')}")
         
-        # Step 2: Get user preferences
+        #  Get user preferences
         print("Fetching user preferences...")
         preferences = firebase_service.get_user_preferences(user_id)
         
