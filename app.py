@@ -180,105 +180,110 @@ def chat():
         # print(f" User data retrieved: {user_data.get('name')}")
         
         #  Get user preferences
-        print("Fetching user preferences...")
-        preferences = firebase_service.get_user_preferences(user_id)
-        
-        if not preferences:
-            print(" No preferences found, using defaults")
-            preferences = {
-                'conversation_tone': 'Gentle',
-                'support_type': 'Supportive Friend',
-                'relationship_status': 'Unknown',
-                'topics_to_avoid': ''
-            }
-        else:
-            print(f"✅ Preferences retrieved: {preferences.get('supportType') or preferences.get('support_type')}")
-            print(f"   📋 Full preferences data: {preferences}")
+        # Preferences will be fetched lazily if needed
+        preferences = {}
         
         #  Get conversation history
         #  (New Thread Architecture: We DO NOT fetch history for the AI, only for the "Mirror" if needed)
         
-        # Check for existing Thread ID
-        print(" Fetching OpenAI Thread ID...")
-        thread_id = firebase_service.get_thread_id(user_id)
+        # Check for existing Thread ID and Message Count
+        print(" Fetching OpenAI Thread Data...")
+        thread_data = firebase_service.get_thread_data(user_id)
+        
+        thread_id = None
+        msg_count = 0
+        
+        if thread_data:
+            thread_id = thread_data.get('thread_id')
+            msg_count = thread_data.get('msg_count', 0)
+
+        # LOGIC: When to inject System Context?
+        # 1. Start of Thread (thread_id is None)
+        # 2. Limit Hit (msg_count > 0 and multiple of 50)
+        
+        should_inject_context = False
+        if not thread_id:
+             print(" No active thread found. Context injection REQUIRED.")
+             should_inject_context = True
+        elif msg_count > 0 and msg_count % 50 == 0:
+             print(f" Message limit hit ({msg_count}). Context refresh REQUIRED.")
+             should_inject_context = True
+        else:
+             print(f" Context active. Message count: {msg_count}")
         
         system_prompt = None
-        if not thread_id:
-            print(" No active thread found. Preparing initial System Prompt with Preferences...")
-            # Only build the full system prompt if we are starting a NEW thread
+        if should_inject_context:
+            print(" Fetching user preferences (Context Refresh)...")
+            preferences = firebase_service.get_user_preferences(user_id)
+            if not preferences:
+                 preferences = {
+                    'support_type': 'Supportive Friend',
+                    'relationship_status': 'Unknown',
+                    'topics_to_avoid': ''
+                 }
+            print(f"✅ Preferences retrieved: {preferences.get('supportType')}")
+            
+            print(" Building System Prompt (Context)...")
             system_prompt = prompt_builder.build_system_prompt(user_data, preferences)
-        else:
-            print(f" Found active thread: {thread_id}")
 
         #  Get AI response (using Threads)
         print(" Calling OpenAI Assistant (Threads)...")
         
-        # If thread_id is None, LLMService will create one using system_prompt
-        # If thread_id exists, LLMService will just append the message
         try:
             ai_response, active_thread_id = llm_service.get_ai_response(
                 user_message=user_message,
                 thread_id=thread_id,
-                system_prompt=system_prompt  # Only used if creating new thread
+                system_prompt=system_prompt 
             )
         except Exception as e:
-            # Fallback: If run fails (e.g. thread deleted), try creating a new one
-            print(f"⚠️ Run failed on thread {thread_id}. Retrying with NEW thread...")
+            # Fallback for invalid thread
+            print(f"⚠️ Run failed. Retrying with NEW thread...")
+            # If run failed, force new thread creation which implicitly injects context
             system_prompt = prompt_builder.build_system_prompt(user_data, preferences)
             ai_response, active_thread_id = llm_service.get_ai_response(
                 user_message=user_message,
                 thread_id=None,
                 system_prompt=system_prompt
             )
-        
+
         print(f"AI response received ({len(ai_response)} chars)")
         
-        # Save new Thread ID if it changed
-        if active_thread_id != thread_id:
-            print(f" Saving new Thread ID: {active_thread_id}")
-            firebase_service.save_thread_id(user_id, active_thread_id)
-        
-        #  Save user message to Firebase (The "Mirror")
-        print(" Saving user message to Firebase...")
-        user_msg_id = firebase_service.save_message(
-            user_id=user_id,
-            chat_session_id=chat_session_id,
-            message_text=user_message,
-            message_type='user'
+        # 3. BACKGROUND TASK: Save to Firestore (Fire and Forget)
+        def save_to_firestore_background(uid, session_id, user_text, ai_text, thread_id_val, active_thread):
+            try:
+                # Save Thread ID if changed (New Thread Created)
+                # save_thread_id will initialize msg_count to 0
+                if active_thread != thread_id_val:
+                    print(f" [Background] Saving new Thread ID: {active_thread}")
+                    firebase_service.save_thread_id(uid, active_thread)
+                else:
+                    # If same thread, increment the count
+                    # We increment once per interaction (User + AI turn)
+                    firebase_service.increment_thread_count(uid)
+                
+                # Save User Message
+                firebase_service.save_message(uid, session_id, user_text, 'user')
+                print(" [Background] User message saved")
+                
+                # Save AI Message
+                firebase_service.save_message(uid, session_id, ai_text, 'ai')
+                print(" [Background] AI message saved")
+                
+                # Update Session Metadata
+                firebase_service.update_session_metadata(session_id)
+            except Exception as bg_e:
+                print(f" [Background] Error saving to Firestore: {bg_e}")
+
+        # Start the background thread
+        import threading
+        save_thread = threading.Thread(
+            target=save_to_firestore_background,
+            args=(user_id, chat_session_id, user_message, ai_response, thread_id, active_thread_id)
         )
+        save_thread.start()
+        print(" Background save task started")
         
-        # Update Cache (Optional, for UI speed)
-        from datetime import datetime
-        # ... (Cache logic can remain or be removed)
-        
-        if user_msg_id:
-            print(f" User message saved (ID: {user_msg_id})")
-        else:
-            print("  Failed to save user message")
-        
-        # Save AI response to Firebase (The "Mirror")
-        print(" Saving AI response to Firebase...")
-        ai_msg_id = firebase_service.save_message(
-            user_id=user_id,
-            chat_session_id=chat_session_id,
-            message_text=ai_response,
-            message_type='ai'
-        )
-        
-        if ai_msg_id:
-            print(f" AI response saved (ID: {ai_msg_id})")
-        else:
-            print("  Failed to save AI response")
-        
-        #  Update session metadata
-        print(" Updating session metadata...")
-        firebase_service.update_session_metadata(chat_session_id)
-        print(" Session metadata updated")
-        
-        print("="*60 + "\n")
-        
-        # Return simplified response
-        # Return expanded response
+        # 4. Return simplified response INSTANTLY
         return jsonify({
             'success': True,
             'data': {

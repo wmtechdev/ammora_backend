@@ -62,8 +62,9 @@ class LLMService:
         """
         Main method to interact with AI.
         - If thread_id is None, creates a NEW thread.
+        - If system_prompt is provided (Event Trigger), it is added as a MESSAGE to the thread context.
         - Adds user message.
-        - Runs assistant (injecting system_prompt as override instructions if provided).
+        - Runs assistant (with truncation).
         """
         try:
             # 1. Manage Thread
@@ -72,31 +73,35 @@ class LLMService:
             if not current_thread_id:
                 print("🧵 Creating new Empty Thread...")
                 current_thread_id = self.create_thread()
+                # If it's a new thread, we likely have a system_prompt to inject immediately
             
-            # Always add the user's message
-            # (If it's a new thread, this is the first message. If existing, it's appended).
+            # 2. Inject Context (If triggered by App Logic)
+            if system_prompt:
+                print(" 💉 Injecting Persistent Context Message...")
+                context_msg = f"SYSTEM_CONTEXT: The following are the user's confirmed preferences. Please allow them to guide your personality dynamics:\n\n{system_prompt}"
+                self.add_message(current_thread_id, context_msg)
+
+            # 3. Add User Message
             self.add_message(current_thread_id, user_message)
             
-            # 2. Run Assistant
+            # 4. Run Assistant
             print(f"🏃 Starting Run on Thread {current_thread_id}...")
             
-            # PREPARE INSTRUCTIONS
-            # We use the Assistant's default instructions, BUT we append the specific user preferences
-            # if this is a fresh start or if we want to reinforce them.
-            run_instructions = None
-            if system_prompt:
-                # "additional_instructions" appends to the Assistant's base instructions.
-                # This is perfect for "Here are the user preferences...".
-                # It does NOT appear in the chat history, so AI won't say "Understood".
-                run_instructions = f"\n\nSPECIFIC USER PREFERENCES:\n{system_prompt}"
+            # We NO LONGER use additional_instructions for preferences.
+            # They are now in the thread history.
             
             run = self.client.beta.threads.runs.create(
                 thread_id=current_thread_id,
                 assistant_id=self.assistant_id,
-                additional_instructions=run_instructions 
+                # Truncation Strategy: Keep last 50 messages.
+                # Since we re-inject context when hitting 50, this is safe.
+                truncation_strategy={
+                    "type": "last_messages",
+                    "last_messages": 50
+                }
             )
             
-            # 3. Poll for Completion
+            # 5. Poll for Completion
             while True:
                 time.sleep(1) # Wait 1s between checks
                 run_status = self.client.beta.threads.runs.retrieve(
@@ -109,7 +114,7 @@ class LLMService:
                 elif run_status.status in ['failed', 'cancelled', 'expired']:
                     raise Exception(f"Run failed with status: {run_status.status}")
                 
-            # 4. Retrieve Messages
+            # 6. Retrieve Messages
             messages = self.client.beta.threads.messages.list(
                 thread_id=current_thread_id
             )

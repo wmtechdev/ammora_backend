@@ -41,18 +41,48 @@ class FirebaseService:
     @staticmethod
     def save_thread_id(user_id, thread_id):
         """
-        Save the OpenAI Thread ID for a user
+        Save the OpenAI Thread ID for a user and initialize msg_count
         """
         try:
             from datetime import datetime
             db.collection('users').document(user_id).collection('metadata').document('openai_thread').set({
                 'thread_id': thread_id,
+                'msg_count': 0,
                 'updated_at': datetime.now()
             }, merge=True)
             return True
         except Exception as e:
             print(f"Error saving thread ID for {user_id}: {str(e)}")
             return False
+
+    @staticmethod
+    def get_thread_data(user_id):
+        """
+        Get thread_id and current message count
+        """
+        try:
+            doc = db.collection('users').document(user_id).collection('metadata').document('openai_thread').get()
+            if doc.exists:
+                data = doc.to_dict()
+                return {
+                    'thread_id': data.get('thread_id'),
+                    'msg_count': data.get('msg_count', 0)
+                }
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def increment_thread_count(user_id):
+        """
+        Increment the message count for the user's thread
+        """
+        try:
+            from firebase_admin import firestore
+            ref = db.collection('users').document(user_id).collection('metadata').document('openai_thread')
+            ref.update({'msg_count': firestore.Increment(1)})
+        except Exception as e:
+            print(f"Error incrementing thread count: {e}")
     
     @staticmethod
     def get_user_preferences(user_id):
