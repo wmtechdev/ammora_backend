@@ -116,6 +116,62 @@ def get_messages(session_id):
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+import stripe
+
+@app.route('/api/create-payment-intent', methods=['POST'])
+def create_payment_intent():
+    """
+    Create a Stripe PaymentIntent
+    
+    Request Body:
+        {
+            "amount": 1000,      # Amount in cents (e.g., $10.00)
+            "currency": "usd",   # Currency code
+            "user_id": "string", # Optional: for metadata
+            "email": "string"    # Optional: for receipt
+        }
+    """
+    try:
+        # Validate API key
+        if not validate_api_key():
+            return jsonify({'success': False, 'error': 'Invalid API key'}), 401
+
+        # Configure Stripe
+        stripe_api_key = os.getenv('STRIPE_SECRET_KEY')
+        if not stripe_api_key:
+            return jsonify({'success': False, 'error': 'Stripe backend not configured'}), 500
+            
+        stripe.api_key = stripe_api_key
+
+        data = request.json
+        amount = data.get('amount')
+        currency = data.get('currency', 'usd')
+        user_id = data.get('user_id')
+
+        if not amount:
+            return jsonify({'success': False, 'error': 'Amount is required'}), 400
+
+        # Create a PaymentIntent with the order amount and currency
+        intent = stripe.PaymentIntent.create(
+            amount=amount,
+            currency=currency,
+            automatic_payment_methods={'enabled': True},
+            metadata={
+                'user_id': user_id,
+                'integration_check': 'accept_a_payment',
+            }
+        )
+
+        return jsonify({
+            'success': True,
+            'clientSecret': intent.client_secret,
+            'publishableKey': os.getenv('STRIPE_PUBLISHABLE_KEY') # Optional, if you want to send it from backend
+        }), 200
+
+    except Exception as e:
+        print(f"Stripe Error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
     """
