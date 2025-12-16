@@ -103,29 +103,31 @@ class FirebaseService:
     @staticmethod
     def get_user_messages(user_id, limit=10):
         """
-        Get last N messages for a user (filtered by user_id)
+        Get last N messages for a user from users/{user_id}/messages
         """
         try:
-            # Query messages for this user
-            messages_query = db.collection('messages')\
-                .where('userId', '==', user_id)\
+            from google.cloud import firestore
+            
+            # Query messages subcollection for this user
+            messages_query = db.collection('users').document(user_id).collection('messages')\
+                .order_by('timestamp', direction=firestore.Query.DESCENDING)\
+                .limit(limit)\
                 .stream()
             
-            # Collect all messages
+            # Collect messages
             messages = []
             for msg_doc in messages_query:
                 msg_data = msg_doc.to_dict()
                 messages.append({
                     'type': msg_data.get('type'),
-                    'message': msg_data.get('text'),   # FIX
+                    'message': msg_data.get('message'), 
                     'timestamp': msg_data.get('timestamp')
                 })
             
             # Sort by timestamp (oldest first)
             messages.sort(key=lambda x: x.get('timestamp') or 0)
             
-            # Return last N messages
-            return messages[-limit:] if len(messages) > limit else messages
+            return messages
             
         except Exception as e:
             print(f"Error fetching messages for user {user_id}: {str(e)}")
@@ -145,34 +147,76 @@ class FirebaseService:
             print(f"Error fetching session {session_id}: {str(e)}")
             return None
     
-    @staticmethod
-    def save_message(user_id, chat_session_id, message_text, message_type):
-       
+    def save_message(self, user_id, chat_session_id, message_text, message_type='user'):
+        """
+        Save a message to Firestore in users/{user_id}/messages
+        """
         try:
             from datetime import datetime
             
+            # Construct message data
             message_data = {
-                'userId': user_id,
-                'chatSessionId': chat_session_id,
-                'text': message_text,
+                'user_id': user_id,
+                'message': message_text,
                 'type': message_type,
                 'timestamp': datetime.now(),
-                'isTyping': False,
-                'metadata': {}
+                'is_typing': False,
+                'metadata': {},
+                'chat_session_id': chat_session_id
             }
             
-            # Add message to collection
-            doc_ref = db.collection('messages').add(message_data)
-            message_id = doc_ref[1].id
+            # Save to: users/{user_id}/messages
+            # We use .add() to generate a random ID, or .document().set() if we had an ID
+            # Here we let Firestore generate the ID
+            _, doc_ref = db.collection('users').document(user_id).collection('messages').add(message_data)
             
-            # Update message with its own ID
-            db.collection('messages').document(message_id).update({'id': message_id})
+            # Update the ID field in the document itself to match doc ID (good practice)
+            doc_ref.update({'id': doc_ref.id})
             
-            return message_id
-            
+            return doc_ref.id
         except Exception as e:
             print(f"Error saving message: {str(e)}")
             return None
+
+    def get_session_messages(self, session_id, limit=50):
+        """
+        Get messages for a specific session.
+        NOTE: Since messages are now partitioned by User, getting by Session ID alone is harder 
+        UNLESS we know the user_id. 
+        For now, we will perform a Collection Group Query OR user-specific query if possible.
+        
+        Assuming we might not know user_id here easily, but better architecture dictates we should.
+        However, to support the API endpoint /api/messages/<session_id>, we need a Collection Group Index
+        OR we change the API to require user_id.
+        
+        For this refactor, I'll assume we start searching in a way that works if we change the API later.
+        BUT, to keep it working without breaking the API signature:
+        
+        We will use a Collection Group Query on 'messages' collection.
+        This requires an index in Firestore.
+        """
+        try:
+            from google.cloud import firestore
+            
+            # Collection Group Query: searches ALL 'messages' subcollections
+            messages = db.collection_group('messages')\
+                .where('chat_session_id', '==', session_id)\
+                .order_by('timestamp', direction=firestore.Query.DESCENDING)\
+                .limit(limit)\
+                .stream()
+                
+            formatted_messages = []
+            for msg in messages:
+                data = msg.to_dict()
+                data['id'] = msg.id
+                formatted_messages.append(data)
+                
+            return sorted(formatted_messages, key=lambda x: x.get('timestamp', ''))
+            
+        except Exception as e:
+            print(f"Error getting session messages: {str(e)}")
+            print("NOTE: A Collection Group Index might be required on 'messages' content.")
+            return []
     
     @staticmethod
     def update_session_metadata(chat_session_id):
@@ -193,4 +237,3 @@ class FirebaseService:
             
         except Exception as e:
             print(f"Error updating session metadata: {str(e)}")
-
