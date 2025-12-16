@@ -172,6 +172,47 @@ def create_payment_intent():
         print(f"Stripe Error: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/update-context', methods=['POST'])
+def update_context():
+    """
+    Endpoint to manually force a System Context injection into the active thread.
+    Call this when user preferences change.
+    """
+    try:
+        if not validate_api_key():
+            return jsonify({'success': False, 'error': 'Invalid API key'}), 401
+
+        data = request.json
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({'success': False, 'error': 'user_id required'}), 400
+            
+        # 1. Get Thread ID
+        thread_id = firebase_service.get_thread_id(user_id)
+        if not thread_id:
+            return jsonify({'success': True, 'message': 'No active thread. Context will be injected on next chat.'}), 200
+            
+        # 2. Fetch User & New Preferences
+        user_data = firebase_service.get_user(user_id)
+        preferences = firebase_service.get_user_preferences(user_id)
+        
+        # 3. Build Prompt
+        system_prompt = prompt_builder.build_system_prompt(user_data, preferences)
+        
+        # 4. Inject into Thread directly
+        print(f"💉 Manual Context Injection for thread {thread_id}")
+        llm_service.add_message(
+            thread_id=thread_id,
+            role="user", # We usually inject context as a user message or system message if supported
+            content=f"SYSTEM_UPDATE: The user has updated their preferences. Please align with: \n\n{system_prompt}"
+        )
+        
+        return jsonify({'success': True, 'message': 'Context updated in active thread'}), 200
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
     """
@@ -223,7 +264,7 @@ def chat():
             }), 400
         
         # Get user data
-        print(" Fetching user data from Firebase...")
+        # print(" Fetching user data from Firebase...")
         user_data = firebase_service.get_user(user_id)
         
         if not user_data:
@@ -233,81 +274,122 @@ def chat():
                 'error': 'User not found'
             }), 404
         
-        # print(f" User data retrieved: {user_data.get('name')}")
-        
-        #  Get user preferences
-        print("Fetching user preferences...")
-        preferences = firebase_service.get_user_preferences(user_id)
-        
-        if not preferences:
-            print(" No preferences found, using defaults")
-            preferences = {
-                'conversation_tone': 'Gentle',
-                'support_type': 'Supportive Friend',
-                'relationship_status': 'Unknown',
-                'topics_to_avoid': ''
-            }
-        else:
-            print(f"✅ Preferences retrieved: {preferences.get('supportType') or preferences.get('support_type')}")
-            print(f"   📋 Full preferences data: {preferences}")
+        # NOTE: We NO LONGER fetch preferences here on every request.
+        # They are only fetched if 'should_inject_context' becomes True below.
         
         #  Get conversation history
         # Try cache first
         from services.session_cache import session_cache
+
+        # Check for existing Thread ID and Message Count
+        # print(" Fetching OpenAI Thread Data...")
+        thread_data = firebase_service.get_thread_data(user_id)
         
-        print(" Fetching conversation history...")
+        # print(" Fetching conversation history...")
         # 1. Try Cache
         cached_history = session_cache.get_history(user_id)
+        thread_id = None
+        msg_count = 0
         
         if cached_history is not None:
-             print(f"✅ Cache HIT for user {user_id}. Using cached history.")
+             # print(f"✅ Cache HIT for user {user_id}. Using cached history.")
              messages = cached_history
-        else:
-             print(f"⚠️ Cache MISS for user {user_id}. Fetching from Firebase...")
-             # 2. Fetch from DB
-             messages = firebase_service.get_user_messages(user_id, limit=10)
-             # 3. Update Cache
-             session_cache.update_history(user_id, messages)
-             print(f"   Cached {len(messages)} messages.")
 
-        print(f"Retrieved {len(messages)} messages")
+        if thread_data:
+            thread_id = thread_data.get('thread_id')
+            msg_count = thread_data.get('msg_count', 0)
         
+        # LOGIC: When to inject System Context?
+        # 1. Start of Thread (thread_id is None)
+        # 2. Limit Hit (msg_count > 0 and multiple of 50)
         
-        print(" Building AI prompt...")
-        system_prompt = prompt_builder.build_system_prompt(user_data, preferences)
-        # Use the history (cached or fetched)
-        conversation_history = prompt_builder.format_conversation_history(messages)
-        print("✅ Prompt built successfully")
+        should_inject_context = False
+        if not thread_id:
+             print(" No active thread found. Context injection REQUIRED.")
+             should_inject_context = True
+        elif msg_count > 0 and msg_count % 50 == 0:
+             print(f" Message limit hit ({msg_count}). Context refresh REQUIRED.")
+             should_inject_context = True
+        else:
+             # print(f"⚠️ Cache MISS for user {user_id}. Fetching from Firebase...")
+             # 2. Fetch from DB
+             if cached_history is None:
+                messages = firebase_service.get_user_messages(user_id, limit=10)
+                session_cache.update_history(user_id, messages)
         
-        # DEBUG: Print the full prompt and contexts
-        print("\n" + "="*60)
-        print("🔍 DEBUG: FULL SYSTEM PROMPT")
-        print("="*60)
-        print(system_prompt)
-        print("="*60)
-        # print(f"📝 Conversation History: {len(conversation_history)} messages")
-        for i, msg in enumerate(conversation_history[-3:]):  # Show last 3 messages
-            print(f"   {i+1}. [{msg['role']}]: {msg['content'][:50]}...")
-        print("="*60 + "\n")
+        system_prompt = None
+        preferences = {} # Default empty
         
-        #  Get AI response
+        if should_inject_context:
+            print(" Fetching user preferences (Context Refresh)...")
+            preferences = firebase_service.get_user_preferences(user_id)
+            if not preferences:
+                 preferences = {
+                    'support_type': 'Supportive Friend',
+                    'relationship_status': 'Unknown',
+                    'topics_to_avoid': ''
+                 }
+            print(f"✅ Preferences retrieved: {preferences.get('supportType')}")
+            
+            print(" Building System Prompt (Context)...")
+            system_prompt = prompt_builder.build_system_prompt(user_data, preferences)
+
+        #  Get AI response (using Threads)
+        # print(" Calling OpenAI Assistant (Threads)...")
         
-        print(" Calling OpenAI API...")
-        ai_response = llm_service.get_ai_response(
-            system_prompt=system_prompt,
-            conversation_history=conversation_history,
-            user_message=user_message
-        )
+        try:
+            ai_response, active_thread_id = llm_service.get_ai_response(
+                user_message=user_message,
+                thread_id=thread_id,
+                system_prompt=system_prompt 
+            )
+        except Exception as e:
+            # Fallback for invalid thread
+            print(f"⚠️ Run failed. Retrying with NEW thread...")
+            # If run failed, force new thread creation which implicitly injects context
+            system_prompt = prompt_builder.build_system_prompt(user_data, preferences)
+            ai_response, active_thread_id = llm_service.get_ai_response(
+                user_message=user_message,
+                thread_id=None,
+                system_prompt=system_prompt
+            )
+
         print(f"AI response received ({len(ai_response)} chars)")
         
-        #  Save user message to Firebase
-        print(" Saving user message to Firebase...")
-        user_msg_id = firebase_service.save_message(
-            user_id=user_id,
-            chat_session_id=chat_session_id,
-            message_text=user_message,
-            message_type='user'
+        # 3. BACKGROUND TASK: Save to Firestore (Fire and Forget)
+        def save_to_firestore_background(uid, session_id, user_text, ai_text, thread_id_val, active_thread):
+            try:
+                # Save Thread ID if changed (New Thread Created)
+                # save_thread_id will initialize msg_count to 0
+                if active_thread != thread_id_val:
+                    print(f" [Background] Saving new Thread ID: {active_thread}")
+                    firebase_service.save_thread_id(uid, active_thread)
+                else:
+                    # If same thread, increment the count
+                    # We increment once per interaction (User + AI turn)
+                    firebase_service.increment_thread_count(uid)
+                
+                # Save User Message
+                firebase_service.save_message(uid, session_id, user_text, 'user')
+                print(" [Background] User message saved")
+                
+                # Save AI Message
+                firebase_service.save_message(uid, session_id, ai_text, 'ai')
+                print(" [Background] AI message saved")
+                
+                # Update Session Metadata
+                firebase_service.update_session_metadata(session_id)
+            except Exception as bg_e:
+                print(f" [Background] Error saving to Firestore: {bg_e}")
+
+        # Start the background thread
+        import threading
+        save_thread = threading.Thread(
+            target=save_to_firestore_background,
+            args=(user_id, chat_session_id, user_message, ai_response, thread_id, active_thread_id)
         )
+        save_thread.start()
+        print(" Background save task started")
         
         # Update Cache with User Message
         from datetime import datetime
@@ -317,21 +399,7 @@ def chat():
             'timestamp': datetime.now()
         }
         session_cache.append_message(user_id, user_msg_obj)
-        
-        if user_msg_id:
-            print(f" User message saved (ID: {user_msg_id})")
-        else:
-            print("  Failed to save user message")
-        
-        # Save AI response to Firebase
-        print(" Saving AI response to Firebase...")
-        ai_msg_id = firebase_service.save_message(
-            user_id=user_id,
-            chat_session_id=chat_session_id,
-            message_text=ai_response,
-            message_type='ai'
-        )
-        
+
         # Update Cache with AI Message
         ai_msg_obj = {
             'type': 'ai', 
@@ -340,20 +408,9 @@ def chat():
         }
         session_cache.append_message(user_id, ai_msg_obj)
         
-        if ai_msg_id:
-            print(f" AI response saved (ID: {ai_msg_id})")
-        else:
-            print("  Failed to save AI response")
-        
-        #  Update session metadata
-        print(" Updating session metadata...")
-        firebase_service.update_session_metadata(chat_session_id)
-        print(" Session metadata updated")
-        
         print("="*60 + "\n")
         
-        # Return simplified response
-        # Return expanded response
+        # 4. Return simplified response INSTANTLY
         return jsonify({
             'success': True,
             'data': {
@@ -361,7 +418,7 @@ def chat():
                 'user_name': user_data.get('name'),
                 'message': ai_response,
                 'preferences': preferences,
-                'history': conversation_history
+                'thread_id': active_thread_id 
             }
         }), 200
         

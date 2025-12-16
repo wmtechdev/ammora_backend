@@ -24,7 +24,6 @@ serviceAccountKey.json
 # OS
 .DS_Store
 Thumbs.db
-test_payment.html
 # Logs
 *.log
 logs/
