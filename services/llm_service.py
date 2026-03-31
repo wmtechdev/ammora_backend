@@ -17,7 +17,7 @@ class LLMService:
         
         self.client = OpenAI(api_key=api_key)
         self.assistant_id = os.getenv("OPENAI_ASSISTANT_ID")
-        self.model = "gpt-4-turbo-preview" # Use a model that supports tools/threads well
+        self.model = "gpt-4-turbo" # Use a model that supports tools/threads well
         
         # If no assistant ID is set, create a basic one (or handle error)
         if not self.assistant_id:
